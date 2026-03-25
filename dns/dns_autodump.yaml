@@ -304,6 +304,7 @@ stringData:
     ## Note: 2 and 3 are good for network checks but not for executing strace for example.
 
     TARGETDIR="/host/var/tmp"
+    MARKER_FILE="${TARGETDIR}/tcpdump-on-dns-capture.lock"
 
     ##RUNCRICTL="/host/usr/bin/crictl  -r unix:///host/run/crio/crio.sock"
     RUNCRICTL="chroot /host /usr/bin/crictl"
@@ -312,6 +313,13 @@ stringData:
     PODNETNS=$(${RUNCRICTL} inspectp ${TESTERPOD} 2>/dev/null |jq -r '.info[].linux.namespaces[]|select(.type=="network").path'|cut -d/ -f5 )
     CONTAINER=$(${RUNCRICTL} ps -p ${TESTERPOD} -q 2>/dev/null)
 
+    ### Check if capture already completed (marker file exists)
+    if [[ -f "${MARKER_FILE}" ]] ;then
+      echo "Capture already completed. Marker file exists: ${MARKER_FILE}"
+      echo "To re-enable monitoring, delete: rm ${MARKER_FILE} and restart this pod"
+      # Sleep forever to keep pod alive but stop monitoring
+      sleep infinity
+    fi
 
     ### Small check to not fill the node storage
     if [[ $(df --output=pcent ${TARGETDIR} |tail -1 |tr -d "%") -ge 75 ]] ;then
@@ -376,5 +384,15 @@ stringData:
       # Waiting 2 minutes for the tcpdumps in background to conclude
       wait
       echo "$(date +%F-%T) Log collection: completed."
+
+      # Create marker file to prevent future captures
+      echo "Capture completed at $(date +%F-%T)" > "${MARKER_FILE}"
+      echo "Node: $(uname -n)" >> "${MARKER_FILE}"
+      echo "Failed URLs: ${FAILED_URLS}" >> "${MARKER_FILE}"
+      echo "Marker file created: ${MARKER_FILE}"
+      echo "Monitoring stopped. To re-enable, delete the marker file."
+
+      # Exit to stop the monitoring loop
+      exit 0
     fi
     exit 0

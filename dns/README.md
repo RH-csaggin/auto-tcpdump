@@ -34,8 +34,9 @@ Based on Red Hat Article: https://access.redhat.com/articles/7054826
         │ Catcher Pod     │  │ Catcher Pod  │  │ Catcher Pod  │
         │ (Node 1)        │  │ (Node 2)     │  │ (Node 3)     │
         │                 │  │              │  │              │
-        │ Triggers        │  │ Triggers     │  │ Triggers     │
+        │ Triggers ONCE   │  │ Triggers ONCE│  │ Triggers ONCE│
         │ tcpdump + logs  │  │ tcpdump +log │  │ tcpdump +log │
+        │ then STOPS      │  │ then STOPS   │  │ then STOPS   │
         └─────────────────┘  └──────────────┘  └──────────────┘
                     │             │                 │
                     └─────────────┴─────────────────┘
@@ -50,8 +51,11 @@ Based on Red Hat Article: https://access.redhat.com/articles/7054826
                     │ - pod_snmp-*.log             │
                     │ - node_top-*.log             │
                     │ - failed_urls-*.log          │
+                    │ - tcpdump-on-dns-capture.lock│
                     └──────────────────────────────┘
 ```
+
+**Important:** The catcher operates in **one-shot mode**. After capturing diagnostics once, it creates a marker file and stops monitoring to prevent multiple captures for the same ongoing issue.
 
 ## Prerequisites
 
@@ -171,6 +175,39 @@ oc logs -n tcpdump-on-dns -l app=tcpdump-on-dns -f
 # 2026-03-25-14:25:16 Log collection: completed.
 ```
 
+## One-Shot Capture Mode
+
+**Important Behavior:** The catcher captures diagnostics **only once** per deployment to prevent filling up disk space with repeated captures during prolonged outages.
+
+### How it works:
+
+1. **First DNS failure detected** → Capture triggered
+2. **Capture completes** → Marker file created: `/var/tmp/tcpdump-on-dns-capture.lock`
+3. **Monitoring stops** → Catcher sleeps indefinitely, no more captures
+4. **Subsequent failures ignored** → Marker file prevents duplicate captures
+
+### Re-enabling monitoring:
+
+To capture again after fixing issues or for a new investigation:
+
+**Option 1: Remove marker file**
+```bash
+oc debug node/<node-name> -- chroot /host rm -f /var/tmp/tcpdump-on-dns-capture.lock
+oc delete pod -n tcpdump-on-dns -l app=tcpdump-on-dns
+```
+
+**Option 2: Redeploy**
+```bash
+oc delete pod -n tcpdump-on-dns --all
+# Pods will restart fresh without marker file
+```
+
+**Option 3: Clean slate**
+```bash
+oc delete project tcpdump-on-dns
+# Then redeploy from scratch
+```
+
 ## Collected Data
 
 When a URL check fails, the following diagnostics are automatically captured:
@@ -185,6 +222,7 @@ When a URL check fails, the following diagnostics are automatically captured:
 | `pod_snmp-<nodename>-<timestamp>.log` | SNMP statistics from tester pod | `/var/tmp` |
 | `node_top-<nodename>-<timestamp>.log` | Process snapshot from host | `/var/tmp` |
 | `failed_urls-<nodename>-<timestamp>.log` | List of URLs that failed at capture time | `/var/tmp` |
+| `tcpdump-on-dns-capture.lock` | Marker file indicating capture completed (prevents duplicates) | `/var/tmp` |
 
 ### Accessing Collected Data
 
