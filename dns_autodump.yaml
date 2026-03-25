@@ -1,0 +1,380 @@
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: tcpdump-on-dns
+---
+allowHostDirVolumePlugin: true
+allowHostIPC: true
+allowHostNetwork: true
+allowHostPID: true
+allowHostPorts: true
+allowPrivilegeEscalation: true
+allowPrivilegedContainer: true
+allowedCapabilities:
+- '*'
+allowedUnsafeSysctls:
+- '*'
+apiVersion: security.openshift.io/v1
+defaultAddCapabilities: null
+fsGroup:
+  type: RunAsAny
+groups: []
+kind: SecurityContextConstraints
+metadata:
+  name: tcpdump-on-dns-privileged-scc
+priority: null
+readOnlyRootFilesystem: false
+requiredDropCapabilities: null
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+seccompProfiles:
+- '*'
+supplementalGroups:
+  type: RunAsAny
+users:
+- system:serviceaccount:tcpdump-on-dns:tcpdump-on-dns-privileged-sa
+volumes:
+- '*'
+---
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegeEscalation: true
+allowPrivilegedContainer: false
+allowedCapabilities:
+- SYS_PTRACE
+apiVersion: security.openshift.io/v1
+defaultAddCapabilities: null
+fsGroup:
+  type: MustRunAs
+groups: []
+kind: SecurityContextConstraints
+metadata:
+  name: tcpdump-on-dns-ptrace-scc
+priority: null
+readOnlyRootFilesystem: false
+requiredDropCapabilities:
+- KILL
+- MKNOD
+- SETUID
+- SETGID
+runAsUser:
+  type: MustRunAsRange
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+users:
+- system:serviceaccount:tcpdump-on-dns:tcpdump-on-dns-ptrace-sa
+volumes:
+- configMap
+- downwardAPI
+- emptyDir
+- ephemeral
+- persistentVolumeClaim
+- projected
+- secret
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tcpdump-on-dns-privileged-sa
+  namespace: tcpdump-on-dns
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tcpdump-on-dns-ptrace-sa
+  namespace: tcpdump-on-dns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:openshift:scc:tcpdump-on-dns-privileged-scc
+rules:
+- apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - tcpdump-on-dns-privileged-scc
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: system:openshift:scc:tcpdump-on-dns-privileged-scc
+  namespace: tcpdump-on-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:tcpdump-on-dns-privileged-scc
+subjects:
+- kind: ServiceAccount
+  name: tcpdump-on-dns-privileged-sa
+  namespace: tcpdump-on-dns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:openshift:scc:tcpdump-on-dns-ptrace-scc
+rules:
+- apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - tcpdump-on-dns-ptrace-scc
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: system:openshift:scc:tcpdump-on-dns-ptrace-scc
+  namespace: tcpdump-on-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:tcpdump-on-dns-ptrace-scc
+subjects:
+- kind: ServiceAccount
+  name: tcpdump-on-dns-ptrace-sa
+  namespace: tcpdump-on-dns
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logs-catcher
+  namespace: tcpdump-on-dns
+spec:
+  revisionHistoryLimit: 4
+  selector:
+    matchLabels:
+      app: tcpdump-on-dns
+  template:
+    metadata:
+      labels:
+        app: tcpdump-on-dns
+    spec:
+      serviceAccount: tcpdump-on-dns-privileged-sa
+      nodeSelector:
+        tcpdump-on-dns-enable: "true"
+      hostNetwork: true
+      containers:
+      - name: logs-catcher
+        image: registry.redhat.io/openshift4/network-tools-rhel8
+        args:
+        - /bin/bash
+        - -c
+        - |
+          sleep 30 ## Giving 30 seconds before starting to wait for the tester ds
+          while true ; do
+            bash /tmp/tcpdump-on-dns-script.sh || exit 1
+            sleep 5 ## Execute the script every 5 seconds
+          done
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /host
+          name: host
+        - mountPath: /tmp/tcpdump-on-dns-script.sh
+          name: catcher-script
+          subPath: tcpdump-on-dns-script.sh
+        - mountPath: /tmp/urls
+          name: url-list
+        resources:
+          requests:
+            cpu: 10m
+            memory: 300Mi
+      volumes:
+      - name: host
+        hostPath:
+          path: /
+          type: ''
+      - name: catcher-script
+        secret:
+          defaultMode: 365
+          secretName: tcpdump-on-dns-script
+      - name: url-list
+        configMap:
+          name: tcpdump-on-dns-urls
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tcpdump-on-dns-urls
+  namespace: tcpdump-on-dns
+data:
+  urls.txt: |
+    kubernetes.default.svc.cluster.local
+    google.com
+    # Add more URLs to check (one per line, # for comments)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tester
+  namespace: tcpdump-on-dns
+spec:
+  revisionHistoryLimit: 4
+  selector:
+    matchLabels:
+      app: tcpdump-on-dns-tester
+  template:
+    metadata:
+      labels:
+        app: tcpdump-on-dns-tester
+    spec:
+      nodeSelector:
+        tcpdump-on-dns-enable: "true"
+      containers:
+      - name: tester
+        image: registry.redhat.io/openshift4/network-tools-rhel8
+        args:
+        - /bin/bash
+        - -c
+        - |
+          while true ; do
+            TIMESTAMP=$(date +%F-%T)
+            FAILED_URLS=""
+
+            # Read and check each URL from the config
+            while IFS= read -r url; do
+              # Skip empty lines and comments
+              [[ -z "$url" || "$url" =~ ^[[:space:]]*# ]] && continue
+
+              # Trim whitespace
+              url=$(echo "$url" | xargs)
+
+              # Try to resolve the URL
+              if ! getent hosts "$url" &>/dev/null; then
+                FAILED_URLS="${FAILED_URLS}${url} "
+                echo "$TIMESTAMP FAILED: $url"
+              else
+                echo "$TIMESTAMP OK: $url"
+              fi
+            done < /tmp/urls/urls.txt
+
+            # Log summary
+            if [[ -n "$FAILED_URLS" ]]; then
+              echo "$TIMESTAMP Summary: Failed URLs: ${FAILED_URLS}"
+            else
+              echo "$TIMESTAMP Summary: All URLs resolved successfully"
+            fi
+
+            sleep 5 ## Execute the script every 5 seconds
+          done
+        volumeMounts:
+        - name: url-list
+          mountPath: /tmp/urls
+        resources:
+          requests:
+            cpu: 10m
+            memory: 300Mi
+      volumes:
+      - name: url-list
+        configMap:
+          name: tcpdump-on-dns-urls
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tcpdump-on-dns-script
+  namespace: tcpdump-on-dns
+type: Opaque
+stringData:
+  tcpdump-on-dns-script.sh: |
+    #!/bin/bash
+
+    ## This script is maintained by Red Hat OpenShift support
+    ## For the unique scope to collect logs when an issue is intermittent with unpredictable behavior.
+    ## Related Red Hat Article: https://access.redhat.com/articles/7054826
+
+    ## This script is executed in the privileged pod which mounts the root of the node under /host
+    ## Three ways can be used for accessing the tester container and execute commands from there:
+    ## 1)  /host/usr/bin/crictl -r unix:///host/run/crio/crio.sock exec ${CONTAINER}
+    ## 2) nsenter --net=/host/run/netns/${PODNETNS}
+    ## 3) chroot /host ip netns exec ${PODNETNS}
+    ## Note: 2 and 3 are good for network checks but not for executing strace for example.
+
+    TARGETDIR="/host/var/tmp"
+
+    ##RUNCRICTL="/host/usr/bin/crictl  -r unix:///host/run/crio/crio.sock"
+    RUNCRICTL="chroot /host /usr/bin/crictl"
+
+    TESTERPOD=$(${RUNCRICTL} pods --namespace tcpdump-on-dns --name tester-* -q --state Ready 2>/dev/null)
+    PODNETNS=$(${RUNCRICTL} inspectp ${TESTERPOD} 2>/dev/null |jq -r '.info[].linux.namespaces[]|select(.type=="network").path'|cut -d/ -f5 )
+    CONTAINER=$(${RUNCRICTL} ps -p ${TESTERPOD} -q 2>/dev/null)
+
+
+    ### Small check to not fill the node storage
+    if [[ $(df --output=pcent ${TARGETDIR} |tail -1 |tr -d "%") -ge 75 ]] ;then
+      echo "Impossible to continue: Usage of ${TARGETDIR} above 75%."
+      exit 1
+    fi
+
+    ### Check if the tester container is running
+    if [[ ${CONTAINER} == "" ]] ;then
+      echo "Impossible to continue: Tester container not ready."
+      exit 1
+    fi
+
+    ### Check all URLs from the configmap
+    ### The collection of the data is done only when ANY URL check fails
+    FAILED_URLS=""
+    URL_LIST_FILE="/tmp/urls/urls.txt"
+
+    # Read and check each URL from the config
+    while IFS= read -r url; do
+      # Skip empty lines and comments
+      [[ -z "$url" || "$url" =~ ^[[:space:]]*# ]] && continue
+
+      # Trim whitespace
+      url=$(echo "$url" | xargs)
+
+      # Try to resolve the URL in the tester container
+      if ! ${RUNCRICTL} exec ${CONTAINER} getent hosts "$url" &>/dev/null; then
+        FAILED_URLS="${FAILED_URLS}${url} "
+      fi
+    done < ${URL_LIST_FILE}
+
+    ### If any URL failed, trigger tcpdump collection
+    if [[ -n "$FAILED_URLS" ]]; then
+      echo "$(date +%F-%T) Log collection: URL checks failed. Failed URLs: ${FAILED_URLS}. Collecting the logs..."
+
+      TIMESTAMP=$(date +%F-%T)
+      NODENAME=$(uname -n)
+
+      PCAPFILENAME=${TARGETDIR}/node_${NODENAME}-${TIMESTAMP}.pcap
+      PPCAPFILENAME=${TARGETDIR}/pod_${NODENAME}-${TIMESTAMP}.pcap
+      STRACEFILENAME=${TARGETDIR}/pod_strace-${NODENAME}-${TIMESTAMP}.log
+      TOPFILENAME=${TARGETDIR}/node_top-${NODENAME}-${TIMESTAMP}.log
+      SSFILENAME=${TARGETDIR}/pod_ss_-a-${NODENAME}-${TIMESTAMP}.log
+      NSTATFILENAME=${TARGETDIR}/pod_nstat_-Zas-${NODENAME}-${TIMESTAMP}.log
+      SNMPFILENAME=${TARGETDIR}/pod_snmp-${NODENAME}-${TIMESTAMP}.log
+      FAILED_URLS_FILE=${TARGETDIR}/failed_urls-${NODENAME}-${TIMESTAMP}.log
+
+      # Save which URLs failed
+      echo "Failed URLs at ${TIMESTAMP}:" > "${FAILED_URLS_FILE}"
+      echo "${FAILED_URLS}" >> "${FAILED_URLS_FILE}"
+
+      ${RUNCRICTL} exec ${CONTAINER} nstat -zas > ${NSTATFILENAME} 2>/dev/null || true
+      ${RUNCRICTL} exec ${CONTAINER} cat /proc/net/snmp > ${SNMPFILENAME} 2>/dev/null || true
+      ${RUNCRICTL} exec ${CONTAINER} ss -a > ${SSFILENAME} 2>/dev/null || true
+      nsenter --net=/host/run/netns/${PODNETNS} timeout 2m tcpdump -B 20480 -s 260 -nni any -w ${PPCAPFILENAME} & # running in background
+      timeout 2m tcpdump -B 20480 -s 260 -nni any -w ${PCAPFILENAME} port 53 or port 5353 or icmp or arp & # running in background
+      ##chroot /host ip netns exec ${PODNETNS} strace -Tttyvvvf -s 8192 curl -sk https://kubernetes.default.svc.cluster.local/livez 2> ${STRACEFILENAME}
+      ${RUNCRICTL} exec ${CONTAINER} strace -Tttyvvvf -s 8192 curl -sk https://kubernetes.default.svc.cluster.local/livez 2> ${STRACEFILENAME} &
+      chroot /host top -H -b -n 1 > ${TOPFILENAME} 2>/dev/null || true
+
+      # Waiting 2 minutes for the tcpdumps in background to conclude
+      wait
+      echo "$(date +%F-%T) Log collection: completed."
+    fi
+    exit 0
